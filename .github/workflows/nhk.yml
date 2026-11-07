@@ -1,15 +1,15 @@
-name: NHK Easy to Discord
+name: NHK News to Discord
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # tiap 30 menit (UTC, bebas timezone)
-  workflow_dispatch:          # tombol run manual
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
 permissions:
-  contents: write             # perlu buat commit seen.json
+  contents: write
 
 concurrency:
-  group: nhk-easy
+  group: nhk-news
   cancel-in-progress: false
 
 jobs:
@@ -21,6 +21,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install dependency
+        run: pip install pykakasi
 
       - name: Kirim berita baru ke Discord
         env:
