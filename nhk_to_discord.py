@@ -5,42 +5,70 @@ import sys
 import time
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone, timedelta
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-LIST_URL = "https://www3.nhk.or.jp/news/easy/news-list.json"
-ARTICLE_URL = "https://www3.nhk.or.jp/news/easy/{id}/{id}.html"
+import pykakasi
+
+# cat0 = berita utama. Lainnya: cat2 budaya/hiburan, cat3 sains/medis,
+# cat6 internasional, cat7 olahraga
+FEED_URLS = [
+    "https://www.nhk.or.jp/rss/news/cat0.xml",
+    "https://news.web.nhk/n-data/conf/na/rss/cat0.xml",  # cadangan
+]
 STATE_FILE = Path("seen.json")
-MAX_POST_PER_RUN = 5   # batas kirim per run biar ga spam
-FIRST_RUN_POST = 3     # run pertama: kirim 3 terbaru aja
-MAX_STATE = 500        # simpan 500 id terakhir
-JST = timezone(timedelta(hours=9))
+MAX_POST_PER_RUN = 5
+FIRST_RUN_POST = 3
+MAX_STATE = 500
+
+KANJI = re.compile(r"[\u4e00-\u9fff々]")
+kks = pykakasi.kakasi()
 
 
-def fetch_json(url):
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0 (nhk-easy-discord-bot)"}
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        # utf-8-sig buang BOM kalau ada
-        return json.loads(r.read().decode("utf-8-sig"))
+def add_furigana(text):
+    """漢字 -> 漢字(かんじ). Hasil otomatis, kadang ada bacaan yang meleset."""
+    out = []
+    for seg in kks.convert(text):
+        orig, hira = seg["orig"], seg["hira"]
+        if KANJI.search(orig) and orig != hira:
+            out.append(f"{orig}({hira})")
+        else:
+            out.append(orig)
+    return "".join(out)
 
 
-def ruby_to_text(html):
-    """<ruby>漢字<rt>かんじ</rt></ruby> -> 漢字(かんじ)"""
-    html = re.sub(r"<rp>.*?</rp>", "", html)
-    html = re.sub(r"<ruby>(.*?)<rt>(.*?)</rt></ruby>", r"\1(\2)", html)
-    return re.sub(r"<[^>]+>", "", html).strip()
+def fetch_feed():
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+    last_err = None
+    for url in FEED_URLS:
+        for attempt in range(2):
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return r.read()
+            except Exception as e:
+                last_err = e
+                print(f"Gagal {url} (percobaan {attempt + 1}): {e}", file=sys.stderr)
+                time.sleep(3)
+    raise last_err
 
 
-def get_articles():
-    data = fetch_json(LIST_URL)
-    articles = []
-    for day in data:  # list berisi dict {tanggal: [artikel, ...]}
-        for _date, items in day.items():
-            articles.extend(items)
-    articles.sort(key=lambda a: a.get("news_prepub_time", ""), reverse=True)
-    return articles
+def parse_items(xml_bytes):
+    root = ET.fromstring(xml_bytes)
+    items = []
+    for it in root.iter("item"):
+        items.append({
+            "title": (it.findtext("title") or "").strip(),
+            "link": (it.findtext("link") or "").strip(),
+            "summary": re.sub(r"<[^>]+>", "", it.findtext("description") or "").strip(),
+            "pub": (it.findtext("pubDate") or "").strip(),
+        })
+    return [i for i in items if i["link"]]
 
 
 def load_seen():
@@ -49,37 +77,35 @@ def load_seen():
     return []
 
 
-def post_to_discord(webhook, article):
-    news_id = article["news_id"]
-    url = ARTICLE_URL.format(id=news_id)
-    plain = article.get("title", "")
-    with_furigana = ruby_to_text(article.get("title_with_ruby", plain))
+def post_to_discord(webhook, item):
+    title = item["title"]
+    desc = f"**{add_furigana(title)}**"
+    if item["summary"]:
+        desc += "\n\n" + add_furigana(item["summary"][:200])
 
     embed = {
-        "title": plain[:256],
-        "url": url,
-        "description": f"**Furigana:** {with_furigana}"[:4000],
+        "title": title[:256],
+        "url": item["link"],
+        "description": desc[:4000],
         "color": 0xE60012,
-        "footer": {"text": "NHK NEWS WEB EASY"},
+        "footer": {"text": "NHK NEWS WEB"},
     }
     try:
-        dt = datetime.strptime(article["news_prepub_time"], "%Y-%m-%d %H:%M:%S")
-        embed["timestamp"] = dt.replace(tzinfo=JST).isoformat()
+        embed["timestamp"] = parsedate_to_datetime(item["pub"]).isoformat()
     except Exception:
         pass
 
-    body = json.dumps({"embeds": [embed]}).encode("utf-8")
     req = urllib.request.Request(
         webhook,
-        data=body,
-        headers={"Content-Type": "application/json", "User-Agent": "nhk-easy-discord-bot"},
+        data=json.dumps({"embeds": [embed]}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "nhk-discord-bot"},
     )
-    for attempt in range(3):
+    for _ in range(3):
         try:
             urllib.request.urlopen(req, timeout=30).read()
             return True
         except urllib.error.HTTPError as e:
-            if e.code == 429:  # rate limit
+            if e.code == 429:
                 wait = float(json.loads(e.read()).get("retry_after", 2))
                 time.sleep(wait + 0.5)
                 continue
@@ -93,27 +119,21 @@ def main():
     if not webhook:
         sys.exit("DISCORD_WEBHOOK_URL belum di-set")
 
-    articles = get_articles()
-    if not articles:
-        sys.exit("List artikel kosong, format endpoint mungkin berubah")
+    items = parse_items(fetch_feed())
+    if not items:
+        sys.exit("Feed kosong, format mungkin berubah")
 
     seen = load_seen()
     first_run = len(seen) == 0
-    new = [a for a in articles if a["news_id"] not in seen]
+    new = [i for i in items if i["link"] not in seen]
+    to_post = new[:FIRST_RUN_POST] if first_run else new[:MAX_POST_PER_RUN]
 
-    if first_run:
-        to_post = new[:FIRST_RUN_POST]
-    else:
-        to_post = new[:MAX_POST_PER_RUN]
-
-    # kirim dari yang paling lama biar urutan di channel benar
-    for a in reversed(to_post):
-        if post_to_discord(webhook, a):
-            print(f"Terkirim: {a['news_id']}")
+    for i in reversed(to_post):  # lama -> baru
+        if post_to_discord(webhook, i):
+            print(f"Terkirim: {i['title']}")
         time.sleep(1)
 
-    # tandai semua yang baru sebagai sudah dilihat
-    seen = [a["news_id"] for a in new] + seen
+    seen = [i["link"] for i in new] + seen
     STATE_FILE.write_text(
         json.dumps(seen[:MAX_STATE], ensure_ascii=False, indent=2), encoding="utf-8"
     )
