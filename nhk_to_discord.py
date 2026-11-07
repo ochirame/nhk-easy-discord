@@ -25,7 +25,7 @@ FEED_URL_TEMPLATES = [
     "https://news.web.nhk/n-data/conf/na/rss/{cat}.xml",  # cadangan, belum diverifikasi
 ]
 STATE_FILE = Path("seen.json")
-MAX_POST_PER_RUN = 5     # per kategori
+MAX_POST_PER_RUN = 3     # per kategori
 FIRST_RUN_POST = 3       # kategori yang baru pertama kali jalan
 MAX_STATE = 1000
 MAX_JISHO_WORDS = 6
