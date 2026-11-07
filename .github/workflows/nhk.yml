@@ -1,0 +1,35 @@
+name: NHK Easy to Discord
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # tiap 30 menit (UTC, bebas timezone)
+  workflow_dispatch:          # tombol run manual
+
+permissions:
+  contents: write             # perlu buat commit seen.json
+
+concurrency:
+  group: nhk-easy
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Kirim berita baru ke Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python nhk_to_discord.py
+
+      - name: Simpan state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen.json
+          git diff --cached --quiet || (git commit -m "update seen.json" && git push)
